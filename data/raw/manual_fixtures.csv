@@ -1,0 +1,3 @@
+match_id,league,date,home_team,away_team,odds_home,odds_draw,odds_away,odds_over_2_5,odds_under_2_5
+# Contoh: EPL_20260915_Arsenal_Chelsea,EPL,2026-09-15,Arsenal,Chelsea,1.85,3.50,4.20,1.95,1.85
+# Hapus baris ini dan tambahkan data laga Anda

@@ -1,0 +1,4 @@
+tanggal,liga,home_team,away_team,market,prediksi,odds,confidence,catatan
+# Contoh: 2026-09-15,EPL,Arsenal,Chelsea,1X2,Home,1.85,0.72,Tengok sendiri yakin Home
+# 2026-09-16,LaLiga,Real Madrid,Barcelona,O/U 2.5,Over,1.95,0.65,Sering tinggi goal
+# Hapus baris ini dan tambahkan bet mentah Anda
