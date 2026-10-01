@@ -3,7 +3,6 @@ scripts/verify_setup.py — Verifikasi setup.
 Exit 0 kalau OK, 1 kalau ada masalah.
 """
 import sys
-import os
 from pathlib import Path
 
 import pandas as pd
@@ -90,7 +89,14 @@ def check_leakage() -> list[dict]:
 
 def check_models() -> list[dict]:
     rows = []
-    for name in ["model_1x2", "model_ou", "model_btts"]:
+    required = [
+        "model_1x2_multiclass",
+        "model_ou_15",
+        "model_ou_25",
+        "model_ou_35",
+        "model_btts",
+    ]
+    for name in required:
         p = path(f"models/{name}.pkl")
         if not p.exists():
             rows.append({"Cek": f"Model {name}", "Status": "✗", "Info": "TIDAK ADA"})

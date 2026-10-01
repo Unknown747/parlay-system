@@ -1,8 +1,9 @@
 """
 config.py — Loader konfigurasi global dengan versioning system.
 Dipakai oleh semua script di scripts/ dan menus/.
-Versi 4: Tambah model versioning, safety thresholds, dan tracking metadata.
+Versi 5: Tambah model versioning stabil, safety thresholds, dan market limits.
 """
+import hashlib
 import os
 from datetime import datetime
 from pathlib import Path
@@ -16,13 +17,24 @@ load_dotenv(ROOT_DIR / ".env")
 
 
 # === VERSIONING SYSTEM ===
-# Setiap training menghasilkan model baru dengan version tag
-# Format: v{MAJOR}_{N_LEAGUES}league_{YYYYMMDD}
-# Contoh: v4_8league_20261001
-MODEL_VERSION_PREFIX = "v4"  # Increment setiap breaking change
+MODEL_VERSION_PREFIX = "v5"
 N_LEAGUES = len([x.strip() for x in os.getenv("LEAGUES", "").split(",") if x.strip()])
 TRAINING_DATE = datetime.now().strftime("%Y%m%d")
-MODEL_VERSION = f"{MODEL_VERSION_PREFIX}_{N_LEAGUES}league_{TRAINING_DATE}"
+
+
+def _stable_model_version() -> str:
+    """Gunakan hash dataset bila data features ada agar model version stabil."""
+    cache = ROOT_DIR / "data/processed/matches_features.csv"
+    if cache.exists():
+        try:
+            digest = hashlib.md5(cache.read_bytes()).hexdigest()[:8]
+            return f"{MODEL_VERSION_PREFIX}_{N_LEAGUES}league_{digest}"
+        except Exception:
+            pass
+    return f"{MODEL_VERSION_PREFIX}_{N_LEAGUES}league_{TRAINING_DATE}"
+
+
+MODEL_VERSION = _stable_model_version()
 
 
 # === Path Helper ===
@@ -47,7 +59,6 @@ MIN_CONFIDENCE = float(os.getenv("MIN_CONFIDENCE", "0.55"))
 MIN_VALUE = float(os.getenv("MIN_VALUE", "0.03"))
 
 # === Tier Thresholds ===
-# Tier S: Premium picks, highest confidence & value
 TIER_S = {
     "conf": float(os.getenv("TIER_S_CONF", "0.72")),
     "value": float(os.getenv("TIER_S_VALUE", "0.10")),
@@ -55,7 +66,6 @@ TIER_S = {
     "stake": int(os.getenv("STAKE_S", "10000")),
 }
 
-# Tier A: Good picks, moderate confidence & value
 TIER_A = {
     "conf": float(os.getenv("TIER_A_CONF", "0.65")),
     "value": float(os.getenv("TIER_A_VALUE", "0.06")),
@@ -63,7 +73,6 @@ TIER_A = {
     "stake": int(os.getenv("STAKE_A", "10000")),
 }
 
-# Tier B: Entertainment picks, basic threshold
 TIER_B = {
     "conf": float(os.getenv("TIER_B_CONF", "0.55")),
     "value": float(os.getenv("TIER_B_VALUE", "0.03")),
@@ -74,18 +83,21 @@ TIER_B = {
 # === Bankroll Management ===
 MAX_DAILY_STAKE = int(os.getenv("MAX_DAILY_STAKE", "100000"))
 MAX_STAKE_PER_MATCH = int(os.getenv("MAX_STAKE_PER_MATCH", "50000"))
-STOP_LOSS_DAILY = int(os.getenv("STOP_LOSS_DAILY", "-50000"))  # Jangan betting kalau sudah loss ini banyak
+MAX_MARKETS_PER_MATCH = int(os.getenv("MAX_MARKETS_PER_MATCH", "2"))
+MAX_MARKETS_PER_LEAGUE = int(os.getenv("MAX_MARKETS_PER_LEAGUE", "20"))
+TRACKING_RETENTION_DAYS = int(os.getenv("TRACKING_RETENTION_DAYS", "90"))
+STOP_LOSS_DAILY = int(os.getenv("STOP_LOSS_DAILY", "-50000"))
 
 # === Data Validation Thresholds ===
 MIN_HISTORICAL_MATCHES = int(os.getenv("MIN_HISTORICAL_MATCHES", "100"))
 MIN_DATA_FRESHNESS_DAYS = int(os.getenv("MIN_DATA_FRESHNESS_DAYS", "7"))
-MAX_MISSING_VALUE_PCT = float(os.getenv("MAX_MISSING_VALUE_PCT", "0.15"))  # Reject kalau > 15% missing
+MAX_MISSING_VALUE_PCT = float(os.getenv("MAX_MISSING_VALUE_PCT", "0.15"))
 
 # === Cross-Validation & Model Safety ===
 CV_FOLDS = int(os.getenv("CV_FOLDS", "5"))
-CV_OVERFITTING_THRESHOLD = float(os.getenv("CV_OVERFITTING_THRESHOLD", "0.15"))  # Alert kalau test_acc > cv_mean + ini
-MIN_BACKTEST_ROI = float(os.getenv("MIN_BACKTEST_ROI", "0.05"))  # Minimal ROI +5% untuk terima model
-MIN_BACKTEST_ACCURACY = float(os.getenv("MIN_BACKTEST_ACCURACY", "0.55"))  # Minimal akurasi 55%
+CV_OVERFITTING_THRESHOLD = float(os.getenv("CV_OVERFITTING_THRESHOLD", "0.15"))
+MIN_BACKTEST_ROI = float(os.getenv("MIN_BACKTEST_ROI", "0.05"))
+MIN_BACKTEST_ACCURACY = float(os.getenv("MIN_BACKTEST_ACCURACY", "0.55"))
 
 # === Telegram ===
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
@@ -114,9 +126,8 @@ LEAGUE_CODES = {
 }
 
 # === League-specific confidence boosts ===
-# Kalau model prediksi lebih confident di liga tertentu, bisa di-adjust
 LEAGUE_CONFIDENCE_ADJUST = {
-    "EPL": 1.0,        # Baseline
+    "EPL": 1.0,
     "LaLiga": 0.95,
     "SerieA": 0.90,
     "Bundesliga": 0.92,
@@ -135,10 +146,7 @@ def hitung_skor(confidence: float, value: float) -> float:
 
 
 def klasifikasi_tier(confidence: float, value: float) -> str:
-    """
-    Tentukan tier berdasarkan confidence, value, dan skor.
-    Return: 'S', 'A', 'B', atau 'X' (tidak lolos).
-    """
+    """Tentukan tier berdasarkan confidence, value, dan skor."""
     skor = hitung_skor(confidence, value)
     if confidence >= TIER_S["conf"] and value >= TIER_S["value"] and skor >= TIER_S["skor"]:
         return "S"
@@ -161,7 +169,6 @@ def adjust_confidence_by_league(confidence: float, league: str) -> float:
 
 
 if __name__ == "__main__":
-    # Test cepat
     print("=== CONFIG TEST ===")
     print(f"Model Version: {MODEL_VERSION}")
     print(f"N Leagues    : {N_LEAGUES}")
@@ -178,6 +185,9 @@ if __name__ == "__main__":
     print("Safety Thresholds:")
     print(f"  Max daily stake     : Rp {MAX_DAILY_STAKE:,}")
     print(f"  Max per match       : Rp {MAX_STAKE_PER_MATCH:,}")
+    print(f"  Max markets/match   : {MAX_MARKETS_PER_MATCH}")
+    print(f"  Max markets/league  : {MAX_MARKETS_PER_LEAGUE}")
+    print(f"  Retention days      : {TRACKING_RETENTION_DAYS}")
     print(f"  Stop loss daily     : Rp {STOP_LOSS_DAILY:,}")
     print(f"  Min backtest ROI    : {MIN_BACKTEST_ROI:.1%}")
     print(f"  Min backtest acc    : {MIN_BACKTEST_ACCURACY:.1%}")

@@ -1,11 +1,10 @@
 """
 predict.py — Prediksi fixtures + filter 3 tier + bobot liga.
-Versi 6: Support 1X2 multiclass model + separate O/U models per line.
-FIX #3: Draw prediction dari multiclass model (bukan residual)
-FIX #5: O/U dari separate models (bukan hardcoded offset)
+Versi 7: support 1X2 multiclass, O/U spesifik, metadata model, market limits, whitelist, tracking enforcement.
 """
 import sys
 import json
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
@@ -14,13 +13,18 @@ import numpy as np
 import joblib
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
-from config import path, OU_LINES, TIER_S, TIER_A, TIER_B, MAX_DAILY_STAKE, hitung_skor, klasifikasi_tier, stake_untuk_tier
+from config import (
+    path, OU_LINES, TIER_S, TIER_A, TIER_B,
+    MAX_DAILY_STAKE, MAX_MARKETS_PER_MATCH, MAX_MARKETS_PER_LEAGUE,
+    hitung_skor, klasifikasi_tier, stake_untuk_tier
+)
 from train import FEATURES
 from validate_fixtures import validate as validate_fixtures
+from league_whitelist import filter_fixtures_by_whitelist
 
-LEAGUE_WEIGHTS = {"Eredivisie": 1.30, "Ligue1": 1.20, "PrimeiraLiga": 0.95, "Championship": 0.90, "LaLiga": 0.70, "SerieA": 0.65, "EPL": 0.60, "Bundesliga": 0.55, "LigaMX": 0.80, "Brasileirao": 0.80}
+LEAGUE_WEIGHTS = {"Eredivisie": 1.30, "Ligue1": 1.20, "PrimeiraLiga": 0.95, "Championship": 0.90, "LaLiga": 0.70, "SerieA": 0.65, "EPL": 0.60, "Bundesliga": 0.55, "LigaMX": 0.80, "Brasileirao": 0.75}
 MIN_WEIGHTED_SCORE = 0.30
-FIXTURE_COLUMNS = ["match_id", "league", "date", "home_team", "away_team", "odds_home", "odds_draw", "odds_away", "odds_over_2_5", "odds_under_2_5", "odds_over_1_5", "odds_under_1_5", "odds_over_3_5", "odds_under_3_5", "odds_btts_yes", "odds_btts_no"]
+FIXTURE_COLUMNS = ["match_id", "league", "date", "home_team", "away_team", "odds_home", "odds_draw", "odds_away", "odds_over_2_5", "odds_under_2_5", "odds_over_1_5", "odds_under_1_5", "odds_over_3_5", "odds_under_3_5"]
 
 
 def format_match_date(value):
@@ -61,6 +65,16 @@ def load_models():
     return models
 
 
+def load_model_metadata():
+    meta_path = path("logs/training_log.json")
+    if meta_path.exists():
+        try:
+            return json.loads(meta_path.read_text())
+        except Exception:
+            return {"model_version": "unknown"}
+    return {"model_version": "unknown"}
+
+
 def load_fixtures() -> pd.DataFrame:
     p = path("data/raw/fixtures_today.csv")
     if not p.exists():
@@ -98,12 +112,21 @@ def get_team_stats(hist: pd.DataFrame, team: str, is_home: int) -> dict:
     gf_col = "home_goals_for_avg_5" if is_home else "away_goals_for_avg_5"
     ga_col = "home_goals_against_avg_5" if is_home else "away_goals_against_avg_5"
     win_col = "home_win_rate" if is_home else "away_win_rate"
-    return {"form_5": team_df[form_col].mean() if form_col in team_df else 1.5, "form_10": team_df[form_col10].mean() if form_col10 in team_df else 1.5, "goals_for_avg_5": team_df[gf_col].mean() if gf_col in team_df else 1.5, "goals_against_avg_5": team_df[ga_col].mean() if ga_col in team_df else 1.2, "win_rate": team_df[win_col].mean() if win_col in team_df else 0.4}
+    return {
+        "form_5": team_df[form_col].mean() if form_col in team_df else 1.5,
+        "form_10": team_df[form_col10].mean() if form_col10 in team_df else 1.5,
+        "goals_for_avg_5": team_df[gf_col].mean() if gf_col in team_df else 1.5,
+        "goals_against_avg_5": team_df[ga_col].mean() if ga_col in team_df else 1.5,
+        "win_rate": team_df[win_col].mean() if win_col in team_df else 0.5,
+    }
 
 
 def build_features(fixtures: pd.DataFrame, hist: pd.DataFrame) -> pd.DataFrame:
     if not hist.empty:
-        league_avg = hist.groupby("league").agg({"home_goals": "mean", "away_goals": "mean", "home_win_rate": "mean", "away_win_rate": "mean", "h2h_avg_goals": "mean", "h2h_home_wins": "mean"}).to_dict("index")
+        league_avg = hist.groupby("league").agg({
+            "home_goals": "mean", "away_goals": "mean", "home_win_rate": "mean", "away_win_rate": "mean",
+            "h2h_avg_goals": "mean", "h2h_home_wins": "mean"
+        }).to_dict()
     else:
         league_avg = {}
     rows = []
@@ -114,7 +137,20 @@ def build_features(fixtures: pd.DataFrame, hist: pd.DataFrame) -> pd.DataFrame:
         away = f.get("away_team", "")
         home_stats = get_team_stats(hist, home, is_home=1)
         away_stats = get_team_stats(hist, away, is_home=0)
-        rows.append({"match_id": f.get("match_id"), "league": liga, "date": f.get("date"), "home_team": home, "away_team": away, "odds_home": f.get("odds_home"), "odds_draw": f.get("odds_draw"), "odds_away": f.get("odds_away"), "odds_over_2_5": f.get("odds_over_2_5"), "odds_under_2_5": f.get("odds_under_2_5"), "odds_over_1_5": f.get("odds_over_1_5"), "odds_under_1_5": f.get("odds_under_1_5"), "odds_over_3_5": f.get("odds_over_3_5"), "odds_under_3_5": f.get("odds_under_3_5"), "odds_btts_yes": f.get("odds_btts_yes"), "odds_btts_no": f.get("odds_btts_no"), "home_form_5": home_stats.get("form_5", 1.5), "away_form_5": away_stats.get("form_5", 1.2), "home_form_10": home_stats.get("form_10", 1.5), "away_form_10": away_stats.get("form_10", 1.2), "home_goals_for_avg_5": home_stats.get("goals_for_avg_5", avg.get("home_goals", 1.5)), "away_goals_for_avg_5": away_stats.get("goals_for_avg_5", avg.get("away_goals", 1.2)), "home_goals_against_avg_5": home_stats.get("goals_against_avg_5", avg.get("away_goals", 1.2)), "away_goals_against_avg_5": away_stats.get("goals_against_avg_5", avg.get("home_goals", 1.5)), "home_win_rate": home_stats.get("win_rate", avg.get("home_win_rate", 0.45)), "away_win_rate": away_stats.get("win_rate", avg.get("away_win_rate", 0.30)), "h2h_avg_goals": avg.get("h2h_avg_goals", 2.5), "h2h_home_wins": avg.get("h2h_home_wins", 2.0), "is_home": 1})
+        rows.append({
+            "match_id": f.get("match_id"), "league": liga, "date": f.get("date"), "home_team": home, "away_team": away,
+            "odds_home": f.get("odds_home"), "odds_draw": f.get("odds_draw"), "odds_away": f.get("odds_away"),
+            "odds_over_2_5": f.get("odds_over_2_5"), "odds_under_2_5": f.get("odds_under_2_5"),
+            "odds_over_1_5": f.get("odds_over_1_5"), "odds_under_1_5": f.get("odds_under_1_5"),
+            "odds_over_3_5": f.get("odds_over_3_5"), "odds_under_3_5": f.get("odds_under_3_5"),
+            "home_form_5": home_stats.get("form_5", 1.5), "away_form_5": away_stats.get("form_5", 1.5),
+            "home_form_10": home_stats.get("form_10", 1.5), "away_form_10": away_stats.get("form_10", 1.5),
+            "home_goals_for_avg_5": home_stats.get("goals_for_avg_5", 1.5), "away_goals_for_avg_5": away_stats.get("goals_for_avg_5", 1.5),
+            "home_goals_against_avg_5": home_stats.get("goals_against_avg_5", 1.5), "away_goals_against_avg_5": away_stats.get("goals_against_avg_5", 1.5),
+            "home_win_rate": home_stats.get("win_rate", 0.5), "away_win_rate": away_stats.get("win_rate", 0.5),
+            "h2h_avg_goals": avg.get("h2h_avg_goals", 2.5), "h2h_home_wins": avg.get("h2h_home_wins", 0.5),
+            "is_home": 1,
+        })
     return pd.DataFrame(rows)
 
 
@@ -176,6 +212,8 @@ def predict_all(models, df: pd.DataFrame) -> list[dict]:
 
 def filter_and_classify(results: list[dict]) -> tuple[list, list, list]:
     tier_s, tier_a, tier_b = [], [], []
+    match_counts = defaultdict(int)
+    league_counts = defaultdict(int)
     for match in results:
         liga = match["league"]
         bobot = LEAGUE_WEIGHTS.get(liga, 0.80)
@@ -196,10 +234,24 @@ def filter_and_classify(results: list[dict]) -> tuple[list, list, list]:
                 tier = "A"
             elif tier == "X":
                 tier = "B"
-            item = {"match_id": match["match_id"], "league": liga, "home": match["home"], "away": match["away"], "date": match.get("date"), "market": p["market"], "prediction": p["prediction"], "confidence": round(conf, 4), "odds": round(float(odds), 2), "value": round(value, 4), "skor_dasar": round(skor_dasar, 4), "bobot_liga": bobot, "skor": round(skor_final, 4), "tier": tier, "stake": stake_untuk_tier(tier)}
-            if tier == "S": tier_s.append(item)
-            elif tier == "A": tier_a.append(item)
-            elif tier == "B": tier_b.append(item)
+            item = {
+                "match_id": match["match_id"], "league": liga, "home": match["home"], "away": match["away"], "date": match.get("date"),
+                "market": p["market"], "prediction": p["prediction"], "confidence": conf, "odds": float(odds), "value": float(value),
+                "skor": float(skor_final), "skor_dasar": float(skor_dasar), "bobot_liga": float(bobot), "stake": stake_untuk_tier(tier),
+            }
+            match_key = (match["match_id"], p["market"])
+            if match_counts[match["match_id"]] >= MAX_MARKETS_PER_MATCH:
+                continue
+            if league_counts[liga] >= MAX_MARKETS_PER_LEAGUE:
+                continue
+            match_counts[match["match_id"]] += 1
+            league_counts[liga] += 1
+            if tier == "S":
+                tier_s.append(item)
+            elif tier == "A":
+                tier_a.append(item)
+            elif tier == "B":
+                tier_b.append(item)
     tier_s.sort(key=lambda x: x["skor"], reverse=True)
     tier_a.sort(key=lambda x: x["skor"], reverse=True)
     tier_b.sort(key=lambda x: x["skor"], reverse=True)
@@ -207,7 +259,8 @@ def filter_and_classify(results: list[dict]) -> tuple[list, list, list]:
 
 
 def render_txt(tier_s, tier_a, tier_b, total_scan: int) -> str:
-    lines = ["=" * 60, f"   PREDIKSI PARLAY — {datetime.now().strftime('%d %B %Y')}", f"   Total scan: {total_scan} laga", f"   Lolos seleksi: {len(tier_s)+len(tier_a)+len(tier_b)} market", "=" * 60, ""]
+    lines = ["=" * 60, f"   PREDIKSI PARLAY — {datetime.now().strftime('%d %B %Y')}", f"   Total scan: {total_scan} laga", f"   Lolos seleksi: {len(tier_s)+len(tier_a)+len(tier_b)} market", "=" * 60]
+
     def render_tier(items, title, emoji):
         if not items:
             lines.append(f"{emoji} {title} — (kosong)")
@@ -235,14 +288,32 @@ def render_txt(tier_s, tier_a, tier_b, total_scan: int) -> str:
     return "\n".join(lines)
 
 
+def apply_daily_limit(all_items, max_daily=MAX_DAILY_STAKE):
+    """Enforce limit harian di tracking dan output."""
+    all_items_sorted = sorted(all_items, key=lambda x: x["skor"], reverse=True)
+    running_total = 0
+    limited_items = []
+    for it in all_items_sorted:
+        stake = int(it.get("stake", 0))
+        if running_total + stake <= max_daily:
+            limited_items.append(it)
+            running_total += stake
+    return limited_items
+
+
 def save_tracking(tier_s, tier_a, tier_b):
-    all_items = tier_s + tier_a + tier_b
+    all_items = apply_daily_limit(tier_s + tier_a + tier_b, MAX_DAILY_STAKE)
     if not all_items:
         return
     today = datetime.now().strftime("%Y-%m-%d")
     rows = []
     for i, it in enumerate(all_items, 1):
-        rows.append({"id": i, "tanggal": today, "tanggal_match": format_match_date(it.get("date")), "match_id": it["match_id"], "liga": it["league"], "home": it["home"], "away": it["away"], "market": it["market"], "prediksi": it["prediction"], "confidence": it["confidence"], "odds": it["odds"], "value": it["value"], "skor": it["skor"], "lapis": it["tier"], "stake_rekomendasi": it["stake"], "keputusan_saya": "", "stake_saya": "", "hasil": "", "profit": "", "catatan": ""})
+        rows.append({
+            "id": i, "tanggal": today, "tanggal_match": format_match_date(it.get("date")), "match_id": it["match_id"], "liga": it["league"],
+            "home": it["home"], "away": it["away"], "market": it["market"], "prediksi": it["prediction"], "odds": it["odds"],
+            "stake_saya": it["stake"], "confidence": it["confidence"], "value": it["value"], "skor": it["skor"], "hasil": "",
+            "profit": 0,
+        })
     df = pd.DataFrame(rows)
     out = path("data/processed/tracking_pending.csv")
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -260,13 +331,22 @@ def main():
             print(f"  - {e}")
         return
     fixtures = load_fixtures()
+    fixtures = filter_fixtures_by_whitelist(fixtures)
     hist = load_historical_stats()
     df = build_features(fixtures, hist)
     results = predict_all(models, df)
     tier_s, tier_a, tier_b = filter_and_classify(results)
     out_json = path("data/processed/predictions_today.json")
     out_json.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"date": datetime.now().strftime("%Y-%m-%d"), "total_scan": len(results), "tier_s": tier_s, "tier_a": tier_a, "tier_b": tier_b}
+    payload = {
+        "date": datetime.now().strftime("%Y-%m-%d"),
+        "model_version": models.get("model_1x2_multiclass").get("model_version", "unknown") if isinstance(models.get("model_1x2_multiclass"), dict) else "unknown",
+        "model_metadata": load_model_metadata(),
+        "total_scan": len(results),
+        "tier_s": tier_s,
+        "tier_a": tier_a,
+        "tier_b": tier_b,
+    }
     out_json.write_text(json.dumps(payload, indent=2, default=str))
     txt = render_txt(tier_s, tier_a, tier_b, len(results))
     out_txt = path("data/processed/predictions_today.txt")

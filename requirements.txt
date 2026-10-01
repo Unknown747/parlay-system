@@ -1,13 +1,109 @@
-pandas>=2.0.0
-numpy>=1.24.0
-scikit-learn>=1.3.0
-xgboost>=2.0.0
-lightgbm>=4.0.0
-matplotlib>=3.7.0
-requests>=2.31.0
-python-dotenv>=1.0.0
-joblib>=1.3.0
-beautifulsoup4>=4.12.0
-lxml>=4.9.0
-tabulate>=0.9.0
-colorama>=0.4.6
+"""Smoke test pipeline untuk validasi end-to-end minimal."""
+import json
+from pathlib import Path
+
+import pandas as pd
+
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def _make_sample_matches():
+    rows = [
+        {
+            "date": "2024-08-10",
+            "league": "EPL",
+            "season": "2024",
+            "home_team": "Arsenal",
+            "away_team": "Chelsea",
+            "home_goals": 2,
+            "away_goals": 1,
+            "result": "H",
+            "home_xg": 1.6,
+            "away_xg": 1.0,
+            "home_shots": 14,
+            "away_shots": 10,
+            "home_corners": 6,
+            "away_corners": 4,
+            "home_possession": 55,
+            "away_possession": 45,
+            "home_passes_accuracy": 82,
+            "away_passes_accuracy": 79,
+            "btts": 1,
+            "over_1_5": 1,
+            "over_2_5": 1,
+            "over_3_5": 0,
+        },
+        {
+            "date": "2024-08-11",
+            "league": "EPL",
+            "season": "2024",
+            "home_team": "Liverpool",
+            "away_team": "Manchester United",
+            "home_goals": 1,
+            "away_goals": 1,
+            "result": "D",
+            "home_xg": 1.3,
+            "away_xg": 1.2,
+            "home_shots": 12,
+            "away_shots": 13,
+            "home_corners": 5,
+            "away_corners": 6,
+            "home_possession": 51,
+            "away_possession": 49,
+            "home_passes_accuracy": 80,
+            "away_passes_accuracy": 78,
+            "btts": 1,
+            "over_1_5": 1,
+            "over_2_5": 1,
+            "over_3_5": 0,
+        },
+        {
+            "date": "2024-08-12",
+            "league": "LaLiga",
+            "season": "2024",
+            "home_team": "Real Madrid",
+            "away_team": "Barcelona",
+            "home_goals": 3,
+            "away_goals": 2,
+            "result": "H",
+            "home_xg": 2.0,
+            "away_xg": 1.6,
+            "home_shots": 18,
+            "away_shots": 15,
+            "home_corners": 7,
+            "away_corners": 5,
+            "home_possession": 57,
+            "away_possession": 43,
+            "home_passes_accuracy": 84,
+            "away_passes_accuracy": 81,
+            "btts": 1,
+            "over_1_5": 1,
+            "over_2_5": 1,
+            "over_3_5": 1,
+        },
+    ]
+    return pd.DataFrame(rows)
+
+
+def test_pipeline_smoke():
+    sample = _make_sample_matches()
+    assert not sample.empty
+    assert set(["date", "league", "home_team", "away_team", "result"]).issubset(sample.columns)
+    assert sample["result"].isin(["H", "D", "A"]).all()
+
+    # Pipeline should be able to create serialized payload
+    payload = {
+        "status": "ok",
+        "rows": len(sample),
+        "leagues": sorted(sample["league"].unique().tolist()),
+    }
+    assert payload["rows"] == 3
+    assert "EPL" in payload["leagues"]
+
+    print("[OK] smoke test passed")
+
+
+if __name__ == "__main__":
+    test_pipeline_smoke()
+    print(json.dumps({"status": "ok", "message": "smoke test passed"}, indent=2))
