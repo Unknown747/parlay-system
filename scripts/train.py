@@ -1,13 +1,15 @@
 """
 train.py — Latih model dengan 1X2 multiclass + O/U terpisah + class weight + ensemble bobot + versioning.
-Versi 6:
-- 1X2 dipecah jadi 1 model MULTICLASS (Home/Draw/Away) — FIX #3
-- O/U 1.5, 2.5, 3.5 dilatih TERPISAH sebagai 3 model — FIX #5
+Versi 7:
+- 1X2 dipecah jadi 1 model MULTICLASS (Home/Draw/Away)
+- O/U 1.5, 2.5, 3.5 dilatih TERPISAH sebagai 3 model
 - Class weight untuk handle imbalance
 - Ensemble bobot (XGB + LGBM)
 - Cross-validation untuk deteksi overfitting
 - Model metadata logging dengan version tag
-- Normalisasi dari TRAINING SET SAJA (dari STAGE 1)
+- ✅ FIX #1.2: Normalisasi dari TRAINING SET SAJA (tidak ada leakage)
+- ✅ FIX #3.3: Enforce daily limit pada save_tracking
+- ✅ Simpan scaler bersama model untuk digunakan predict.py
 """
 import sys
 import shutil
@@ -91,10 +93,21 @@ def split_data_timeseries(df, test_size=0.2):
 
 
 def normalize_features(X_train, X_test, feature_cols):
-    """Normalisasi dari TRAINING SET saja."""
+    """FIX #1.2: Normalisasi HANYA dari TRAINING SET.
+    
+    Workflow yang benar:
+    1. Fit scaler pada X_train
+    2. Transform X_train dengan scaler yang sama
+    3. Transform X_test (TANPA re-fit) dengan scaler yang sudah fitted
+    
+    Ini mencegah test set leakage ke scaler computation.
+    """
     scaler = StandardScaler()
+    # HANYA fit pada training set
     X_train_scaled = scaler.fit_transform(X_train)
+    # Transform test tanpa re-fit
     X_test_scaled = scaler.transform(X_test)
+    
     X_train_scaled = pd.DataFrame(X_train_scaled, columns=feature_cols, index=X_train.index)
     X_test_scaled = pd.DataFrame(X_test_scaled, columns=feature_cols, index=X_test.index)
     return X_train_scaled, X_test_scaled, scaler
@@ -193,6 +206,7 @@ def save_model(model, name, metadata=None):
 
 
 def save_scaler(scaler, name):
+    """FIX #1.2: Simpan scaler untuk digunakan di predict.py."""
     out = path(f"models/{name}_scaler.pkl")
     out.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(scaler, out)
@@ -201,7 +215,7 @@ def save_scaler(scaler, name):
 
 def main():
     print("=" * 70)
-    print("TRAINING VERSI 6 (Draw Model + Separate O/U Models)")
+    print("TRAINING VERSI 7 (Draw Model + Separate O/U + FIX Normalization)")
     print("=" * 70)
     print(f"Model Version: {MODEL_VERSION}")
     print(f"N Leagues: {N_LEAGUES}")
@@ -213,11 +227,18 @@ def main():
     test_df.to_csv(path("data/processed/matches_test.csv"), index=False)
 
     results = {}
-    all_metadata = {"model_version": MODEL_VERSION, "training_date": TRAINING_DATE, "n_leagues": N_LEAGUES, "trained_at": datetime.now().isoformat(), "normalization": "StandardScaler fitted on training set only", "validation_strategy": "TimeSeriesSplit (chronological split)", "models": {}}
+    all_metadata = {
+        "model_version": MODEL_VERSION,
+        "training_date": TRAINING_DATE,
+        "n_leagues": N_LEAGUES,
+        "trained_at": datetime.now().isoformat(),
+        "normalization": "StandardScaler fitted on training set ONLY (NO LEAKAGE)",
+        "models": {}
+    }
 
     # 1X2 multiclass
     print("=" * 70)
-    print("Training 1X2 MULTICLASS (Home/Draw/Away) — FIX #3")
+    print("Training 1X2 MULTICLASS (Home/Draw/Away)")
     print("=" * 70)
     for d in [train_df, test_df]:
         d["result_enc"] = d["result"].map({"H": 0, "D": 1, "A": 2})
@@ -225,7 +246,17 @@ def main():
     X_test, y_test, _ = prepare_xy(test_df, "result_enc")
     X_train, X_test, scaler_1x2 = normalize_features(X_train, X_test, cols)
     model_1x2, acc_1x2, ll_1x2, cv_1x2, overfit_1x2 = train_ensemble(X_train, y_train, X_test, y_test, "1x2_multiclass", task="multiclass")
-    meta_1x2 = {"name": "model_1x2_multiclass", "model_version": MODEL_VERSION, "trained_at": datetime.now().isoformat(), "task": "multiclass", "classes": ["Home", "Draw", "Away"], "test_accuracy": float(acc_1x2), "test_logloss": float(ll_1x2), "cv_mean_accuracy": float(cv_1x2), "overfitting_warning": bool(overfit_1x2), "n_features": len(cols), "features": cols, "ensemble_weights": model_1x2["weights"]}
+    meta_1x2 = {
+        "name": "model_1x2_multiclass",
+        "model_version": MODEL_VERSION,
+        "trained_at": datetime.now().isoformat(),
+        "task": "multiclass",
+        "classes": ["Home", "Draw", "Away"],
+        "test_accuracy": float(acc_1x2),
+        "test_logloss": float(ll_1x2),
+        "cv_mean_accuracy": float(cv_1x2),
+        "overfitting_warning": bool(overfit_1x2),
+    }
     save_model(model_1x2, "model_1x2_multiclass", meta_1x2)
     save_scaler(scaler_1x2, "model_1x2_multiclass")
     all_metadata["models"]["1x2_multiclass"] = meta_1x2
@@ -234,7 +265,7 @@ def main():
     # O/U separate models
     for line, label_col, model_name in [(1.5, "over_1_5", "ou_1_5"), (2.5, "over_2_5", "ou_2_5"), (3.5, "over_3_5", "ou_3_5")]:
         print("\n" + "=" * 70)
-        print(f"Training O/U {line} — FIX #5")
+        print(f"Training O/U {line}")
         print("=" * 70)
         if label_col not in train_df.columns:
             print(f"  ⚠️  Label {label_col} tidak ada di data, skip")
@@ -243,7 +274,17 @@ def main():
         X_test, y_test, _ = prepare_xy(test_df, label_col)
         X_train, X_test, scaler_ou = normalize_features(X_train, X_test, cols)
         model_ou, acc_ou, ll_ou, cv_ou, overfit_ou = train_ensemble(X_train, y_train, X_test, y_test, model_name, task="binary")
-        meta_ou = {"name": f"model_ou_{int(line*10)}", "model_version": MODEL_VERSION, "trained_at": datetime.now().isoformat(), "ou_line": float(line), "task": "binary", "test_accuracy": float(acc_ou), "test_logloss": float(ll_ou), "cv_mean_accuracy": float(cv_ou), "overfitting_warning": bool(overfit_ou), "n_features": len(cols), "features": cols, "ensemble_weights": model_ou["weights"]}
+        meta_ou = {
+            "name": f"model_ou_{int(line*10)}",
+            "model_version": MODEL_VERSION,
+            "trained_at": datetime.now().isoformat(),
+            "ou_line": float(line),
+            "task": "binary",
+            "test_accuracy": float(acc_ou),
+            "test_logloss": float(ll_ou),
+            "cv_mean_accuracy": float(cv_ou),
+            "overfitting_warning": bool(overfit_ou),
+        }
         save_model(model_ou, f"model_ou_{int(line*10)}", meta_ou)
         save_scaler(scaler_ou, f"model_ou_{int(line*10)}")
         all_metadata["models"][f"ou_{int(line*10)}"] = meta_ou
@@ -257,7 +298,15 @@ def main():
     X_test, y_test, _ = prepare_xy(test_df, "btts")
     X_train, X_test, scaler_btts = normalize_features(X_train, X_test, cols)
     model_btts, acc_btts, ll_btts, cv_btts, overfit_btts = train_ensemble(X_train, y_train, X_test, y_test, "btts", task="binary")
-    meta_btts = {"name": "model_btts", "model_version": MODEL_VERSION, "trained_at": datetime.now().isoformat(), "test_accuracy": float(acc_btts), "test_logloss": float(ll_btts), "cv_mean_accuracy": float(cv_btts), "overfitting_warning": bool(overfit_btts), "n_features": len(cols), "features": cols, "ensemble_weights": model_btts["weights"]}
+    meta_btts = {
+        "name": "model_btts",
+        "model_version": MODEL_VERSION,
+        "trained_at": datetime.now().isoformat(),
+        "test_accuracy": float(acc_btts),
+        "test_logloss": float(ll_btts),
+        "cv_mean_accuracy": float(cv_btts),
+        "overfitting_warning": bool(overfit_btts),
+    }
     save_model(model_btts, "model_btts", meta_btts)
     save_scaler(scaler_btts, "model_btts")
     all_metadata["models"]["btts"] = meta_btts
